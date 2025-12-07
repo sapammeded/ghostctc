@@ -1,0 +1,373 @@
+﻿<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <title>Ghost Candle Live (BTCUSDT 1m)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+  <style>
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #020617;
+      color: #e5e7eb;
+    }
+    .app {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 10px;
+    }
+    h1 {
+      font-size: 1.1rem;
+      text-align: center;
+      margin: 4px 0;
+    }
+    .sub {
+      font-size: 0.75rem;
+      text-align: center;
+      color: #9ca3af;
+      margin-bottom: 8px;
+    }
+    .card {
+      background: #020617;
+      border-radius: 12px;
+      border: 1px solid #1f2937;
+      padding: 10px;
+      margin-bottom: 8px;
+    }
+    #chart {
+      width: 100%;
+      height: 360px;
+    }
+    .info {
+      font-size: 0.78rem;
+      margin-top: 4px;
+    }
+    .info small {
+      color: #9ca3af;
+    }
+    .status {
+      font-size: 0.75rem;
+      color: #9ca3af;
+      margin-bottom: 4px;
+    }
+    .status span {
+      font-weight: 600;
+    }
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 7px;
+      border-radius: 999px;
+      font-size: 0.7rem;
+      background: rgba(31,41,55,0.9);
+      color: #9ca3af;
+      margin-right: 4px;
+      margin-top: 3px;
+    }
+    @media (max-width: 480px) {
+      #chart { height: 320px; }
+    }
+  </style>
+</head>
+<body>
+<div class="app">
+  <h1>Ghost Candle Live</h1>
+  <div class="sub">
+    Pair: <b>BTCUSDT</b> • Timeframe: <b>1 menit</b><br>
+    Candle hijau/merah = market real, candle biru di kanan = <b>ghost candle prediksi</b>.
+  </div>
+
+  <div class="card">
+    <div class="status">Status koneksi: <span id="wsStatus">Connecting...</span></div>
+    <div id="chart"></div>
+    <div class="info" id="contextText"></div>
+    <div class="info" id="predictionText"></div>
+    <div class="info">
+      <small>⚠️ Harga = real dari Binance. Ghost candle = prediksi bentuk berikutnya (latihan baca candlestick), bukan sinyal wajib entry.</small>
+    </div>
+  </div>
+</div>
+
+<script>
+  // ====== STATE ======
+  const candles = [];      // data real
+  const maxCandles = 200;  // supaya chart nggak terlalu berat
+
+  const wsStatusEl = document.getElementById("wsStatus");
+  const contextEl = document.getElementById("contextText");
+  const predictionEl = document.getElementById("predictionText");
+
+  // ====== CHART SETUP ======
+  const container = document.getElementById("chart");
+  const chart = LightweightCharts.createChart(container, {
+    width: container.clientWidth,
+    height: container.clientHeight,
+    layout: { background: { color: "#020617" }, textColor: "#e5e7eb" },
+    grid: {
+      vertLines: { color: "#111827" },
+      horzLines: { color: "#111827" },
+    },
+    timeScale: { timeVisible: true, secondsVisible: false },
+  });
+
+  const seriesReal = chart.addCandlestickSeries({
+    upColor: "#22c55e",
+    downColor: "#ef4444",
+    borderUpColor: "#22c55e",
+    borderDownColor: "#ef4444",
+    wickUpColor: "#22c55e",
+    wickDownColor: "#ef4444",
+  });
+
+  const seriesGhost = chart.addCandlestickSeries({
+    upColor: "rgba(56,189,248,0.7)",
+    downColor: "rgba(59,130,246,0.7)",
+    borderUpColor: "rgba(56,189,248,0.9)",
+    borderDownColor: "rgba(59,130,246,0.9)",
+    wickUpColor: "rgba(56,189,248,0.9)",
+    wickDownColor: "rgba(59,130,246,0.9)",
+  });
+
+  function updateChart(ghost) {
+    const realData = candles.map(c => ({
+      time: Math.floor(c.time / 1000),
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+    }));
+    seriesReal.setData(realData);
+
+    if (ghost) {
+      const lastTime = candles.length
+        ? Math.floor(candles[candles.length - 1].time / 1000)
+        : Math.floor(Date.now() / 1000);
+      seriesGhost.setData([{
+        time: lastTime + 60, // candle setelahnya
+        open: ghost.open,
+        high: ghost.high,
+        low: ghost.low,
+        close: ghost.close,
+      }]);
+    } else {
+      seriesGhost.setData([]);
+    }
+
+    chart.timeScale().fitContent();
+  }
+
+  window.addEventListener("resize", () => {
+    chart.applyOptions({ width: container.clientWidth, height: 360 });
+  });
+
+  // ====== ANALISA SEDERHANA ======
+  function atrMini(data, period = 14) {
+    if (data.length < 2) return 0;
+    const start = Math.max(1, data.length - period);
+    let sum = 0, count = 0;
+    for (let i = start; i < data.length; i++) {
+      const cur = data[i];
+      const prev = data[i - 1];
+      const tr = Math.max(
+        cur.high - cur.low,
+        Math.abs(cur.high - prev.close),
+        Math.abs(cur.low - prev.close)
+      );
+      sum += tr;
+      count++;
+    }
+    return count > 0 ? sum / count : 0;
+  }
+
+  function classifyLastCandle(c) {
+    const body = Math.abs(c.close - c.open);
+    const range = c.high - c.low || 1;
+    const upperWick = c.high - Math.max(c.open, c.close);
+    const lowerWick = Math.min(c.open, c.close) - c.low;
+    const bodyPct = body / range;
+    const upperPct = upperWick / range;
+    const lowerPct = lowerWick / range;
+    const dir = c.close >= c.open ? 1 : -1;
+
+    // Doji
+    if (bodyPct < 0.15 && upperPct > 0.2 && lowerPct > 0.2) {
+      return { label: "doji", dir, bodyPct, upperPct, lowerPct };
+    }
+    // Pin bawah
+    if (lowerPct > 0.4 && dir >= 0) {
+      return { label: "bull_reject_low", dir, bodyPct, upperPct, lowerPct };
+    }
+    // Pin atas
+    if (upperPct > 0.4 && dir <= 0) {
+      return { label: "bear_reject_high", dir, bodyPct, upperPct, lowerPct };
+    }
+    // Momentum
+    if (bodyPct > 0.6 && dir > 0) {
+      return { label: "bull_momentum", dir, bodyPct, upperPct, lowerPct };
+    }
+    if (bodyPct > 0.6 && dir < 0) {
+      return { label: "bear_momentum", dir, bodyPct, upperPct, lowerPct };
+    }
+    // Default
+    if (dir > 0) return { label: "bull_small", dir, bodyPct, upperPct, lowerPct };
+    if (dir < 0) return { label: "bear_small", dir, bodyPct, upperPct, lowerPct };
+    return { label: "neutral", dir: 0, bodyPct, upperPct, lowerPct };
+  }
+
+  function miniTrendDir(data, lookback = 10) {
+    if (data.length < 2) return 0;
+    const start = Math.max(0, data.length - lookback);
+    const slice = data.slice(start);
+    const first = slice[0].close;
+    const last = slice[slice.length - 1].close;
+    const diff = last - first;
+    if (diff > 0) return 1;
+    if (diff < 0) return -1;
+    return 0;
+  }
+
+  function randBetween(a, b) {
+    return a + Math.random() * (b - a);
+  }
+
+  function makeGhostCandle(last, history) {
+    const atr = atrMini(history, 14) || (last.high - last.low || 1);
+    const lastType = classifyLastCandle(last);
+    const trendDir = miniTrendDir(history, 20);
+
+    // tentukan arah ghost
+    let dir = lastType.dir;
+    if (Math.abs(dir) === 0) dir = trendDir || (Math.random() > 0.5 ? 1 : -1);
+
+    // range kira-kira
+    let range = atr * randBetween(0.7, 1.3);
+    if (!isFinite(range) || range <= 0) range = Math.abs(last.close || 1) * 0.003;
+
+    // body fraction
+    let bodyFrac;
+    if (lastType.label === "bull_momentum" || lastType.label === "bear_momentum") {
+      bodyFrac = randBetween(0.6, 0.9);
+    } else if (lastType.label === "bull_reject_low" || lastType.label === "bear_reject_high") {
+      bodyFrac = randBetween(0.4, 0.7);
+    } else if (lastType.label === "doji") {
+      bodyFrac = randBetween(0.2, 0.5);
+    } else {
+      bodyFrac = randBetween(0.3, 0.6);
+    }
+
+    const wickTotal = Math.max(0, 1 - bodyFrac);
+    let lowerWickFrac, upperWickFrac;
+
+    if (dir > 0) {
+      // bullish: bias wick bawah sedikit lebih panjang
+      lowerWickFrac = randBetween(wickTotal * 0.4, wickTotal * 0.8);
+      upperWickFrac = Math.max(0, wickTotal - lowerWickFrac);
+    } else {
+      // bearish: bias wick atas sedikit lebih panjang
+      upperWickFrac = randBetween(wickTotal * 0.4, wickTotal * 0.8);
+      lowerWickFrac = Math.max(0, wickTotal - upperWickFrac);
+    }
+
+    const bodySize = range * bodyFrac;
+    const lowerWick = range * lowerWickFrac;
+    const upperWick = range * upperWickFrac;
+
+    const open = last.close + randBetween(-atr * 0.05, atr * 0.05);
+    const close = dir > 0 ? (open + bodySize) : (open - bodySize);
+    const low = Math.min(open, close) - lowerWick;
+    const high = Math.max(open, close) + upperWick;
+
+    return {
+      open, high, low, close,
+      meta: { dir, range, bodyFrac, lowerWickFrac, upperWickFrac, lastType }
+    };
+  }
+
+  function updateText(ghost) {
+    if (!ghost) {
+      contextEl.textContent = "Mengumpulkan data awal...";
+      predictionEl.textContent = "";
+      return;
+    }
+    const dirText = ghost.meta.dir > 0 ? "Bullish" : "Bearish";
+    const bodyPct = (ghost.meta.bodyFrac * 100).toFixed(1);
+    const lwPct = (ghost.meta.lowerWickFrac * 100).toFixed(1);
+    const uwPct = (ghost.meta.upperWickFrac * 100).toFixed(1);
+
+    contextEl.innerHTML = `
+      Pola candle terakhir: <b>${ghost.meta.lastType.label}</b> (dir: ${ghost.meta.lastType.dir > 0 ? "bull" : ghost.meta.lastType.dir < 0 ? "bear" : "netral"}) 
+    `;
+
+    predictionEl.innerHTML = `
+      <div class="tag">Arah ghost: <b>${dirText}</b></div>
+      <br>
+      Perkiraan bentuk candle berikutnya (ghost biru):<br>
+      - Body ~ <b>${bodyPct}%</b> dari total range<br>
+      - Wick bawah ~ <b>${lwPct}%</b> • Wick atas ~ <b>${uwPct}%</b><br>
+      - Perkiraan range: ~<b>${ghost.meta.range.toFixed(2)}</b><br>
+    `;
+  }
+
+  // ====== WEBSOCKET BINANCE ======
+  const wsUrl = "wss://stream.binance.com:9443/ws/btcusdt@kline_1m";
+  let ws;
+
+  function connectWS() {
+    ws = new WebSocket(wsUrl);
+    wsStatusEl.textContent = "Connecting...";
+
+    ws.onopen = () => {
+      wsStatusEl.textContent = "Connected (BTCUSDT 1m)";
+    };
+
+    ws.onclose = () => {
+      wsStatusEl.textContent = "Disconnected. Reconnecting...";
+      setTimeout(connectWS, 3000);
+    };
+
+    ws.onerror = () => {
+      wsStatusEl.textContent = "Error. Reconnecting...";
+      ws.close();
+    };
+
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (!data.k) return;
+      const k = data.k;
+      const isFinal = k.x;
+
+      const candle = {
+        time: k.t,
+        open: parseFloat(k.o),
+        high: parseFloat(k.h),
+        low: parseFloat(k.l),
+        close: parseFloat(k.c),
+      };
+
+      // Update candle berjalan
+      if (candles.length && candles[candles.length - 1].time === candle.time) {
+        candles[candles.length - 1] = candle;
+      } else if (isFinal) {
+        candles.push(candle);
+        if (candles.length > maxCandles) candles.shift();
+      }
+
+      if (candles.length < 20) {
+        updateChart(null);
+        updateText(null);
+        return;
+      }
+
+      const last = candles[candles.length - 1];
+      const ghost = makeGhostCandle(last, candles);
+      updateChart(ghost);
+      updateText(ghost);
+    };
+  }
+
+  connectWS();
+</script>
+</body>
+</html>
