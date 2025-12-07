@@ -1,8 +1,8 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="id">
 <head>
   <meta charset="UTF-8" />
-  <title>Ghost Candle Live (BTCUSDT 1m)</title>
+  <title>Ghost Candle Live (REST Version)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
   <style>
@@ -54,6 +54,21 @@
     .status span {
       font-weight: 600;
     }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+    select {
+      background: #020617;
+      color: #e5e7eb;
+      border-radius: 999px;
+      padding: 4px 10px;
+      border: 1px solid #4b5563;
+      font-size: 0.8rem;
+    }
     .tag {
       display: inline-flex;
       align-items: center;
@@ -68,36 +83,72 @@
     }
     @media (max-width: 480px) {
       #chart { height: 320px; }
+      .controls {
+        flex-direction: column;
+        align-items: flex-start;
+      }
     }
   </style>
 </head>
 <body>
 <div class="app">
-  <h1>Ghost Candle Live</h1>
+  <h1>Ghost Candle Live (REST)</h1>
   <div class="sub">
-    Pair: <b>BTCUSDT</b> • Timeframe: <b>1 menit</b><br>
-    Candle hijau/merah = market real, candle biru di kanan = <b>ghost candle prediksi</b>.
+    Harga real dari Binance (REST, auto-refresh).<br>
+    Candle hijau/merah = market real. Candle biru di kanan = <b>ghost candle prediksi</b>.
   </div>
 
   <div class="card">
-    <div class="status">Status koneksi: <span id="wsStatus">Connecting...</span></div>
+    <div class="controls">
+      <div style="font-size:0.8rem;">Pair:</div>
+      <select id="symbolSelect">
+        <option value="BTCUSDT">BTCUSDT (Bitcoin)</option>
+        <option value="ETHUSDT">ETHUSDT (Ethereum)</option>
+        <option value="BNBUSDT">BNBUSDT (BNB)</option>
+        <option value="XRPUSDT">XRPUSDT (XRP)</option>
+        <option value="SOLUSDT">SOLUSDT (Solana)</option>
+      </select>
+      <div style="font-size:0.75rem;color:#9ca3af;">
+        TF: 1 menit (interval 1m, data real-time via polling).
+      </div>
+    </div>
+    <div class="status">
+      Status: <span id="statusText">Init...</span><br>
+      Last update: <span id="lastUpdate">-</span>
+    </div>
     <div id="chart"></div>
     <div class="info" id="contextText"></div>
     <div class="info" id="predictionText"></div>
     <div class="info">
-      <small>⚠️ Harga = real dari Binance. Ghost candle = prediksi bentuk berikutnya (latihan baca candlestick), bukan sinyal wajib entry.</small>
+      <small>⚠️ Harga = real dari Binance (klines 1m). Ghost candle = prediksi bentuk berikutnya (latihan baca candlestick), bukan sinyal wajib entry.</small>
     </div>
   </div>
 </div>
 
 <script>
   // ====== STATE ======
-  const candles = [];      // data real
-  const maxCandles = 200;  // supaya chart nggak terlalu berat
+  let candles = [];        // data real
+  const maxCandles = 200;  // batasi jumlah candle di chart
+  let currentSymbol = "BTCUSDT";
+  let pollingTimer = null;
 
-  const wsStatusEl = document.getElementById("wsStatus");
+  const statusText = document.getElementById("statusText");
+  const lastUpdateEl = document.getElementById("lastUpdate");
   const contextEl = document.getElementById("contextText");
   const predictionEl = document.getElementById("predictionText");
+  const symbolSelect = document.getElementById("symbolSelect");
+
+  symbolSelect.value = currentSymbol;
+  symbolSelect.addEventListener("change", () => {
+    currentSymbol = symbolSelect.value;
+    candles = [];
+    updateChart(null);
+    contextEl.textContent = "";
+    predictionEl.textContent = "";
+    lastUpdateEl.textContent = "-";
+    statusText.textContent = "Change pair, loading...";
+    startPolling();
+  });
 
   // ====== CHART SETUP ======
   const container = document.getElementById("chart");
@@ -145,7 +196,7 @@
         ? Math.floor(candles[candles.length - 1].time / 1000)
         : Math.floor(Date.now() / 1000);
       seriesGhost.setData([{
-        time: lastTime + 60, // candle setelahnya
+        time: lastTime + 60, // candle berikutnya
         open: ghost.open,
         high: ghost.high,
         low: ghost.low,
@@ -162,7 +213,7 @@
     chart.applyOptions({ width: container.clientWidth, height: 360 });
   });
 
-  // ====== ANALISA SEDERHANA ======
+  // ====== ANALISA SEDERHANA UNTUK GHOST ======
   function atrMini(data, period = 14) {
     if (data.length < 2) return 0;
     const start = Math.max(1, data.length - period);
@@ -191,32 +242,27 @@
     const lowerPct = lowerWick / range;
     const dir = c.close >= c.open ? 1 : -1;
 
-    // Doji
     if (bodyPct < 0.15 && upperPct > 0.2 && lowerPct > 0.2) {
       return { label: "doji", dir, bodyPct, upperPct, lowerPct };
     }
-    // Pin bawah
     if (lowerPct > 0.4 && dir >= 0) {
       return { label: "bull_reject_low", dir, bodyPct, upperPct, lowerPct };
     }
-    // Pin atas
     if (upperPct > 0.4 && dir <= 0) {
       return { label: "bear_reject_high", dir, bodyPct, upperPct, lowerPct };
     }
-    // Momentum
     if (bodyPct > 0.6 && dir > 0) {
       return { label: "bull_momentum", dir, bodyPct, upperPct, lowerPct };
     }
     if (bodyPct > 0.6 && dir < 0) {
       return { label: "bear_momentum", dir, bodyPct, upperPct, lowerPct };
     }
-    // Default
     if (dir > 0) return { label: "bull_small", dir, bodyPct, upperPct, lowerPct };
     if (dir < 0) return { label: "bear_small", dir, bodyPct, upperPct, lowerPct };
     return { label: "neutral", dir: 0, bodyPct, upperPct, lowerPct };
   }
 
-  function miniTrendDir(data, lookback = 10) {
+  function miniTrendDir(data, lookback = 20) {
     if (data.length < 2) return 0;
     const start = Math.max(0, data.length - lookback);
     const slice = data.slice(start);
@@ -235,17 +281,14 @@
   function makeGhostCandle(last, history) {
     const atr = atrMini(history, 14) || (last.high - last.low || 1);
     const lastType = classifyLastCandle(last);
-    const trendDir = miniTrendDir(history, 20);
+    const trendDir = miniTrendDir(history, 30);
 
-    // tentukan arah ghost
     let dir = lastType.dir;
     if (Math.abs(dir) === 0) dir = trendDir || (Math.random() > 0.5 ? 1 : -1);
 
-    // range kira-kira
     let range = atr * randBetween(0.7, 1.3);
     if (!isFinite(range) || range <= 0) range = Math.abs(last.close || 1) * 0.003;
 
-    // body fraction
     let bodyFrac;
     if (lastType.label === "bull_momentum" || lastType.label === "bear_momentum") {
       bodyFrac = randBetween(0.6, 0.9);
@@ -261,11 +304,9 @@
     let lowerWickFrac, upperWickFrac;
 
     if (dir > 0) {
-      // bullish: bias wick bawah sedikit lebih panjang
       lowerWickFrac = randBetween(wickTotal * 0.4, wickTotal * 0.8);
       upperWickFrac = Math.max(0, wickTotal - lowerWickFrac);
     } else {
-      // bearish: bias wick atas sedikit lebih panjang
       upperWickFrac = randBetween(wickTotal * 0.4, wickTotal * 0.8);
       lowerWickFrac = Math.max(0, wickTotal - upperWickFrac);
     }
@@ -296,78 +337,75 @@
     const lwPct = (ghost.meta.lowerWickFrac * 100).toFixed(1);
     const uwPct = (ghost.meta.upperWickFrac * 100).toFixed(1);
 
-    contextEl.innerHTML = `
-      Pola candle terakhir: <b>${ghost.meta.lastType.label}</b> (dir: ${ghost.meta.lastType.dir > 0 ? "bull" : ghost.meta.lastType.dir < 0 ? "bear" : "netral"}) 
-    `;
+    const lt = ghost.meta.lastType;
+    let lastDesc = "";
+    if (lt.label === "bull_momentum") lastDesc = "bullish momentum (body besar, close dekat high)";
+    else if (lt.label === "bear_momentum") lastDesc = "bearish momentum (body besar, close dekat low)";
+    else if (lt.label === "bull_reject_low") lastDesc = "bullish rejection dari bawah (ekor bawah panjang)";
+    else if (lt.label === "bear_reject_high") lastDesc = "bearish rejection dari atas (ekor atas panjang)";
+    else if (lt.label === "doji") lastDesc = "doji / ragu-ragu";
+    else if (lt.label === "bull_small") lastDesc = "bullish kecil";
+    else if (lt.label === "bear_small") lastDesc = "bearish kecil";
+    else lastDesc = "candle netral / kecil";
+
+    contextEl.innerHTML = `Candle terakhir: <b>${lastDesc}</b>`;
 
     predictionEl.innerHTML = `
       <div class="tag">Arah ghost: <b>${dirText}</b></div>
+      <div class="tag">Body relatif: ~<b>${bodyPct}%</b> dari range</div>
       <br>
       Perkiraan bentuk candle berikutnya (ghost biru):<br>
-      - Body ~ <b>${bodyPct}%</b> dari total range<br>
       - Wick bawah ~ <b>${lwPct}%</b> • Wick atas ~ <b>${uwPct}%</b><br>
       - Perkiraan range: ~<b>${ghost.meta.range.toFixed(2)}</b><br>
     `;
   }
 
-  // ====== WEBSOCKET BINANCE ======
-  const wsUrl = "wss://stream.binance.com:9443/ws/btcusdt@kline_1m";
-  let ws;
+  // ====== FETCH DATA DARI BINANCE (REST) ======
+  async function fetchKlines(symbol) {
+    const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=1m&limit=200`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    const mapped = data.map(k => ({
+      time: k[0],
+      open: parseFloat(k[1]),
+      high: parseFloat(k[2]),
+      low: parseFloat(k[3]),
+      close: parseFloat(k[4]),
+    }));
+    return mapped;
+  }
 
-  function connectWS() {
-    ws = new WebSocket(wsUrl);
-    wsStatusEl.textContent = "Connecting...";
-
-    ws.onopen = () => {
-      wsStatusEl.textContent = "Connected (BTCUSDT 1m)";
-    };
-
-    ws.onclose = () => {
-      wsStatusEl.textContent = "Disconnected. Reconnecting...";
-      setTimeout(connectWS, 3000);
-    };
-
-    ws.onerror = () => {
-      wsStatusEl.textContent = "Error. Reconnecting...";
-      ws.close();
-    };
-
-    ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      if (!data.k) return;
-      const k = data.k;
-      const isFinal = k.x;
-
-      const candle = {
-        time: k.t,
-        open: parseFloat(k.o),
-        high: parseFloat(k.h),
-        low: parseFloat(k.l),
-        close: parseFloat(k.c),
-      };
-
-      // Update candle berjalan
-      if (candles.length && candles[candles.length - 1].time === candle.time) {
-        candles[candles.length - 1] = candle;
-      } else if (isFinal) {
-        candles.push(candle);
-        if (candles.length > maxCandles) candles.shift();
-      }
-
+  async function loadDataOnce() {
+    try {
+      statusText.textContent = `Loading ${currentSymbol}...`;
+      const klines = await fetchKlines(currentSymbol);
+      candles = klines.slice(-maxCandles);
+      statusText.textContent = `OK (${currentSymbol})`;
+      lastUpdateEl.textContent = new Date().toLocaleTimeString();
       if (candles.length < 20) {
         updateChart(null);
         updateText(null);
         return;
       }
-
       const last = candles[candles.length - 1];
       const ghost = makeGhostCandle(last, candles);
       updateChart(ghost);
       updateText(ghost);
-    };
+    } catch (e) {
+      console.error(e);
+      statusText.textContent = "Error load data (cek internet / CORS).";
+    }
   }
 
-  connectWS();
+  function startPolling() {
+    if (pollingTimer) clearInterval(pollingTimer);
+    loadDataOnce();
+    pollingTimer = setInterval(loadDataOnce, 5000); // refresh tiap 5 detik
+  }
+
+  // start
+  startPolling();
 </script>
 </body>
 </html>
